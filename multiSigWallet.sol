@@ -68,18 +68,14 @@ contract MultiSigWallet is Pausable {
                 _numConfirmationsRequired <= _owners.length,
             "invalid number of required confirmations"
         );
-
         for (uint i = 0; i < _owners.length; i++) {
             address owner = _owners[i];
-
             require(owner != address(0), "invalid owner");
             require(!isOwner[owner], "owner not unique");
-
             isOwner[owner] = true;
             owners.push(owner);
             isOwner[_owners[i]] = true;
         }
-
         numConfirmationsRequired = _numConfirmationsRequired;
     }
 
@@ -93,7 +89,6 @@ contract MultiSigWallet is Pausable {
         uint txIndex = transactions.length;
         IERC20 token;
         token = IERC20(_tokenAddress);
-
         transactions.push(
             Transaction({
                 from: msg.sender,
@@ -105,7 +100,6 @@ contract MultiSigWallet is Pausable {
                 numConfirmations: 0
             })
         );
-
         emit SubmitTransaction(msg.sender, txIndex, _to, _tokenAddress, _amount, _message);
     }
 
@@ -116,7 +110,6 @@ contract MultiSigWallet is Pausable {
         // require(transaction.from != msg.sender, "The owner who submit the transaction cannot call this function");
         transaction.numConfirmations += 1;
         isConfirmed[_txIndex][msg.sender] = true;
-
         emit ConfirmTransaction(msg.sender, _txIndex);
     }
 
@@ -137,8 +130,6 @@ contract MultiSigWallet is Pausable {
             transaction.numConfirmations >= numConfirmationsRequired,
             "cannot execute tx"
         );
-
-
         emit ExecuteTransaction(msg.sender, _txIndex);
         transaction.executed = true;    
         emit TokenTransfered(_tokenAddress, msg.sender, _to, _amount);
@@ -149,12 +140,9 @@ contract MultiSigWallet is Pausable {
         uint _txIndex
     ) public onlyOwner txExists(_txIndex) notExecuted(_txIndex) whenNotPaused {
         Transaction storage transaction = transactions[_txIndex];
-
         require(isConfirmed[_txIndex][msg.sender], "tx not confirmed");
-
         transaction.numConfirmations -= 1;
         isConfirmed[_txIndex][msg.sender] = false;
-
         emit RevokeConfirmation(msg.sender, _txIndex);
     }
 
@@ -182,7 +170,6 @@ contract MultiSigWallet is Pausable {
         )
     {
         Transaction storage transaction = transactions[_txIndex];
-
         return (
             transaction.from,
             transaction.to,

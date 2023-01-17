@@ -1,26 +1,25 @@
 // SPDX-License-Identifier: MIT
-
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "hardhat/console.sol";
 
-contract K4NftCarSignatureEdition1V2 is ERC721, Ownable, ReentrancyGuard {
-    uint256 private constant NFTTOTALSUPPLY = 999;
-    bool public isSaleActive = true;
-    uint256 private constant _CONTRACTID = 11;
-
-    event NFTMinted(
-        address _to,
-        uint256 indexed _tokenId,
-        uint256 indexed _quantity,
-        bool _success,
-        uint256 _contractID
+contract MultiSigWallet is Pausable {
+    event Deposit(address indexed sender, uint amount, uint balance);
+    event SubmitTransaction(
+        address indexed owner,
+        uint indexed txIndex,
+        address indexed to,
+        address tokenAddress,
+        uint amount,
+        string message
     );
+    event ConfirmTransaction(address indexed owner, uint indexed txIndex);
+    event RevokeConfirmation(address indexed owner, uint indexed txIndex);
+    event ExecuteTransaction(address indexed owner, uint indexed txIndex);
     event TokenTransfered(
         address _token,
         address _from,
@@ -28,225 +27,206 @@ contract K4NftCarSignatureEdition1V2 is ERC721, Ownable, ReentrancyGuard {
         uint256 indexed _amount
     );
 
-    mapping(bytes => bool) private signatureUsed;
-    mapping(address => bool) private whitelistedAddress;
+    address[] private owners;
+    uint public numConfirmationsRequired;
+    Transaction[] private transactions;
+    mapping(address => bool) private isOwner;
+    mapping(uint => mapping(address => bool)) private isConfirmed;
 
-    constructor()
-        ERC721(
-            "K4 Signature Edition #1 - Christof Klausner Memorial",
-            "K4CARSE"
-        )
-    {}
-
-    function contractURI() public pure returns (string memory) {
-        return "https://game.k4rally.io/nft/car/11/";
+    struct Transaction {
+        address from;
+        address to;
+        address tokenAddress;
+        uint amount;
+        string message;
+        bool executed;
+        uint numConfirmations;
     }
 
-    function _baseURI() internal pure override returns (string memory) {
-        return "https://game.k4rally.io/nft/car/11/";
-    }
-
-    modifier isWhitelisted(address _address) {
-        require(whitelistedAddress[_address], "You need to be whitelisted");
+    modifier onlyOwner() {
+        require(isOwner[msg.sender], "not owner");
         _;
     }
 
-    function safeMintUsingEther(
-        uint256[] memory tokenId,
-        uint256 quantity,
-        bytes32 hash,
-        bytes memory signature
-    ) public payable nonReentrant {
-        require(quantity <= 10, "Cannot buy more than 10 nfts");
-        require(quantity != 0, "Insufficient quantity");
-        require(isSaleActive, "Sale Inactive");
-        require(msg.value != 0, "Insufficient amount");
-        require(
-            recoverSigner(hash, signature) == owner(),
-            "Address is not authorized"
-        );
-        require(!signatureUsed[signature], "Already signature used");
-        require(tokenId.length == quantity, "Invalid parameter");
-        for (uint256 i = 0; i < quantity; i++) {
-            if (tokenId[i] <= NFTTOTALSUPPLY && !_exists(tokenId[i])) {
-                _safeMint(msg.sender, tokenId[i]);
-                emit NFTMinted(
-                    msg.sender,
-                    tokenId[i],
-                    quantity,
-                    true,
-                    _CONTRACTID
-                );
-            } else {
-                emit NFTMinted(
-                    msg.sender,
-                    tokenId[i],
-                    quantity,
-                    false,
-                    _CONTRACTID
-                );
-            }
-        }
-        signatureUsed[signature] = true;
+    modifier txExists(uint _txIndex) {
+        require(_txIndex < transactions.length, "tx does not exist");
+        _;
     }
 
-    function safeMintUsingToken(
-        uint256[] memory tokenId,
-        address tokenAddress,
-        uint256 amount,
-        uint256 quantity,
-        bytes32 hash,
-        bytes memory signature
-    ) public {
-        require(quantity <= 10, "Cannot buy more than 10 nfts");
-        require(quantity != 0, "Insufficient quantity");
-        require(isSaleActive, "Sale Inactive");
-        require(amount != 0, "Insufficient amount");
-        require(tokenAddress != address(0), "Address cannot be zero");
+    modifier notExecuted(uint _txIndex) {
+        require(!transactions[_txIndex].executed, "tx already executed");
+        _;
+    }
+
+    modifier notConfirmed(uint _txIndex) {
+        require(!isConfirmed[_txIndex][msg.sender], "tx already confirmed");
+        _;
+    }
+
+    constructor(address[] memory _owners, uint _numConfirmationsRequired) {
+        require(_owners.length > 0, "owners required");
         require(
-            recoverSigner(hash, signature) == owner(),
-            "Address is not authorized"
+            _numConfirmationsRequired > 0 &&
+                _numConfirmationsRequired <= _owners.length,
+            "invalid number of required confirmations"
         );
-        require(!signatureUsed[signature], "Already signature used");
-        require(tokenId.length == quantity, "Invalid parameter");
+
+        for (uint i = 0; i < _owners.length; i++) {
+            address owner = _owners[i];
+
+            require(owner != address(0), "invalid owner");
+            require(!isOwner[owner], "owner not unique");
+
+            isOwner[owner] = true;
+            owners.push(owner);
+            isOwner[_owners[i]] = true;
+        }
+
+        numConfirmationsRequired = _numConfirmationsRequired;
+    }
+
+    function submitTransaction(
+        address _to,
+        address _tokenAddress,
+        uint _amount,
+        string memory _message
+    ) public onlyOwner whenNotPaused {
+        require(_tokenAddress != address(0) && _to != address(0), "Address cannot be zero");
+        uint txIndex = transactions.length;
         IERC20 token;
-        token = IERC20(tokenAddress);
+        token = IERC20(_tokenAddress);
+
+        transactions.push(
+            Transaction({
+                from: msg.sender,
+                to: _to,
+                tokenAddress: _tokenAddress,
+                amount: _amount,
+                message: _message,
+                executed: false,
+                numConfirmations: 0
+            })
+        );
+
+        emit SubmitTransaction(msg.sender, txIndex, _to, _tokenAddress, _amount, _message);
+    }
+
+    function confirmTransaction(
+        uint _txIndex
+    ) public onlyOwner txExists(_txIndex) notExecuted(_txIndex) notConfirmed(_txIndex) whenNotPaused {
+        Transaction storage transaction = transactions[_txIndex];
+        // require(transaction.from != msg.sender, "The owner who submit the transaction cannot call this function");
+        transaction.numConfirmations += 1;
+        isConfirmed[_txIndex][msg.sender] = true;
+
+        emit ConfirmTransaction(msg.sender, _txIndex);
+    }
+
+    function executeTransaction(
+        uint _txIndex, address _to, address _tokenAddress,  uint256 _amount
+    ) public onlyOwner txExists(_txIndex) notExecuted(_txIndex) whenNotPaused {
+        Transaction storage transaction = transactions[_txIndex];
+        require(transaction.to == _to && transaction.tokenAddress == _tokenAddress && transaction.amount == _amount, "Invalid parameters");
+        require(_amount != 0, "Insufficient amount");
+        require(_tokenAddress != address(0), "Address cannot be zero");
+        IERC20 token;
+        token = IERC20(_tokenAddress);
         require(
-            token.allowance(msg.sender, address(this)) >= amount,
+            token.allowance(msg.sender, address(this)) >= _amount,
             "Check the token allowance"
         );
-        for (uint256 i = 0; i < quantity; i++) {
-            if (tokenId[i] <= NFTTOTALSUPPLY && !_exists(tokenId[i])) {
-                _safeMint(msg.sender, tokenId[i]);
-                emit NFTMinted(
-                    msg.sender,
-                    tokenId[i],
-                    quantity,
-                    true,
-                    _CONTRACTID
-                );
-            } else {
-                emit NFTMinted(
-                    msg.sender,
-                    tokenId[i],
-                    quantity,
-                    false,
-                    _CONTRACTID
-                );
-            }
-        }
-        signatureUsed[signature] = true;
-        emit TokenTransfered(tokenAddress, msg.sender, address(this), amount);
-        SafeERC20.safeTransferFrom(token, msg.sender, address(this), amount);
-    }
-
-    function mintHotWallet(
-        uint256[] memory tokenId,
-        uint256 quantity,
-        address to
-    ) external isWhitelisted(msg.sender){
-        require(quantity <= 10, "Cannot buy more than 10 nfts");
-        require(quantity != 0, "Insufficient quantity");
-        require(isSaleActive, "Sale Inactive");
         require(
-            to != address(0),
-            "Address cannot be zero"
+            transaction.numConfirmations >= numConfirmationsRequired,
+            "cannot execute tx"
         );
-        require(tokenId.length == quantity, "Invalid parameter");
-        for (uint256 i = 0; i < quantity; i++) {
-            if (tokenId[i] <= NFTTOTALSUPPLY && !_exists(tokenId[i])) {
-                _safeMint(to, tokenId[i]);
-                emit NFTMinted(to, tokenId[i], quantity, true, _CONTRACTID);
-            } else {
-                emit NFTMinted(
-                    to,
-                    tokenId[i],
-                    quantity,
-                    false,
-                    _CONTRACTID
-                );
-            }
-        }
+
+
+        emit ExecuteTransaction(msg.sender, _txIndex);
+        transaction.executed = true;    
+        emit TokenTransfered(_tokenAddress, msg.sender, _to, _amount);
+        SafeERC20.safeTransferFrom(token, msg.sender, _to, _amount);
     }
 
-    function directMint(
-        uint256 tokenId,
-        bytes32 hash,
-        bytes memory signature
-    ) external {
-        require(isSaleActive, "Sale Inactive");
-        require(
-            recoverSigner(hash, signature) == owner(),
-            "Address is not authorized"
-        );
-        require(!signatureUsed[signature], "Already signature used");
-        if (tokenId <= NFTTOTALSUPPLY && !_exists(tokenId)) {
-            _safeMint(msg.sender, tokenId);
-            emit NFTMinted(msg.sender, tokenId, 1,true, _CONTRACTID);
-        } else {
-            emit NFTMinted(
-                msg.sender,
-                tokenId,
-                0,
-                false,
-                _CONTRACTID
-            );
-        }
-        signatureUsed[signature] = true;
+    function revokeConfirmation(
+        uint _txIndex
+    ) public onlyOwner txExists(_txIndex) notExecuted(_txIndex) whenNotPaused {
+        Transaction storage transaction = transactions[_txIndex];
+
+        require(isConfirmed[_txIndex][msg.sender], "tx not confirmed");
+
+        transaction.numConfirmations -= 1;
+        isConfirmed[_txIndex][msg.sender] = false;
+
+        emit RevokeConfirmation(msg.sender, _txIndex);
     }
 
-    function withdraw(address payable recipient) public onlyOwner {
-        require(recipient != address(0), "Address cannot be zero");
-        recipient.transfer(address(this).balance);
+    function getOwners() public view returns (address[] memory) {
+        return owners;
     }
 
-    function withdrawToken(address tokenAddress, address recipient)
+    function getTransactionCount() public view returns (uint) {
+        return transactions.length;
+    }
+
+    function getTransaction(
+        uint _txIndex
+    )
         public
-        onlyOwner
-    {
-        require(recipient != address(0), "Address cannot be zero");
-        IERC20 token;
-        token = IERC20(tokenAddress);
-        require(token.balanceOf(address(this)) > 0, "Insufficient balance");
-        SafeERC20.safeTransfer(
-            token,
-            recipient,
-            token.balanceOf(address(this))
-        );
-    }
-
-    function setHotwalletAddress(address user) external onlyOwner {
-        require(user != address(0), "Address cannot be 0");
-        require(!whitelistedAddress[user], "User already exists");
-        whitelistedAddress[user] = true;
-    }
-
-    function removeHotwalletAddress(address user) public onlyOwner {
-        require(user != address(0), "Address cannot be 0");
-        whitelistedAddress[user] = false;
-    }
-
-    function getHotWalletAddress(address _address)
-        external
         view
-        onlyOwner
-        returns (bool)
+        returns (
+            address from,
+            address to,
+            address tokenAddress,
+            uint amount,
+            string memory message,
+            bool executed,
+            uint numConfirmations
+        )
     {
-        return whitelistedAddress[_address];
-    }
+        Transaction storage transaction = transactions[_txIndex];
 
-    function flipSaleStatus() public onlyOwner {
-        isSaleActive = !isSaleActive;
-    }
-
-    function recoverSigner(bytes32 hash, bytes memory signature)
-        internal
-        pure
-        returns (address)
-    {
-        bytes32 messageDigest = keccak256(
-            abi.encodePacked("\x19Ethereum Signed Message:\n32", hash)
+        return (
+            transaction.from,
+            transaction.to,
+            transaction.tokenAddress,
+            transaction.amount,
+            transaction.message,
+            transaction.executed,
+            transaction.numConfirmations
         );
-        return ECDSA.recover(messageDigest, signature);
+    }
+
+    function addOwners(address newOwners) external onlyOwner whenNotPaused {
+        require(newOwners != address(0), "Address cannot be 0");
+        require(!isOwner[newOwners], "Owners already exists");
+        owners.push(newOwners);
+        isOwner[newOwners] = true;
+    }
+
+    function removeOwners(address oldOwners) public onlyOwner whenNotPaused { 
+        require(oldOwners != msg.sender, "Another owner can call this function");
+        require(oldOwners != address(0), "Address cannot be 0");
+        require(isOwner[oldOwners], "Owners already removed");
+        for (uint256 i = 0; i < owners.length; i++) {
+            if (owners[i] == oldOwners) {
+                delete owners[i];       
+                isOwner[oldOwners] = false;
+            }
+        }
+    }
+
+    function pause() public {
+        _pause();
+    }
+
+    function unpause() public {
+        _unpause();
+    }
+
+    function changeNumConfirmationsRequired(uint _txIndex, uint256 _numConfirmationsRequired) public whenNotPaused onlyOwner notExecuted(_txIndex) {
+        Transaction storage transaction = transactions[_txIndex];
+        require(transaction.from == msg.sender, "Owner who submitted the transaction can only call this function");
+        require(numConfirmationsRequired != _numConfirmationsRequired, "Numbers of required confirmations is already same");
+        numConfirmationsRequired = _numConfirmationsRequired;
     }
 }

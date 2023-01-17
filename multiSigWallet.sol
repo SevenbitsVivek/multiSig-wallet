@@ -103,6 +103,7 @@ contract MultiSigWallet is Pausable {
             })
         );
         bytes32 _id = keccak256(abi.encode(transactions));
+        //bytes32 _id = keccak256(abi.encodePacked(msg.sender, _to, _tokenAddress, _amount));
         ids[txIndex] = _id;
         emit SubmitTransaction(msg.sender, txIndex, _to, _tokenAddress, _amount, _message);
     }

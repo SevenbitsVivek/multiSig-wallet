@@ -221,7 +221,7 @@ contract MultiSigWallet is Pausable {
         Transaction storage transaction = transactions[_txIndex];
         require(ids[_txIndex] == _id, "Invalid parameters");
         require(transaction.from == msg.sender, "Owner who submitted the transaction can only call this function");
-        require(numConfirmationsRequired != _numConfirmationsRequired, "Numbers of required confirmations is same");
+        require(numConfirmationsRequired != _numConfirmationsRequired, "Numbers of required confirmations is already same");
         numConfirmationsRequired = _numConfirmationsRequired;
     }
 

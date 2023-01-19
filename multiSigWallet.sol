@@ -1,29 +1,30 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "hardhat/console.sol";
 
-contract MultiSigWallet is Pausable {
-    bytes32 id;
+contract MultiSigWallet is Pausable, ERC20 {
+    uint256 private _totalSupply;
     event Deposit(address indexed sender, uint amount, uint balance);
     event SubmitTransaction(
         address indexed owner,
         uint indexed txIndex,
         address indexed to,
-        address tokenAddress,
         uint amount,
         string message
     );
     event ConfirmTransaction(address indexed owner, uint indexed txIndex);
     event RevokeConfirmation(address indexed owner, uint indexed txIndex);
     event ExecuteTransaction(address indexed owner, uint indexed txIndex);
+    event TokenMint(address indexed to, uint256 indexed amount);
     event TokenTransfered(
-        address _token,
-        address _from,
-        address _to,
-        uint256 indexed _amount
+        address token,
+        address from,
+        address to,
+        uint256 indexed amount
     );
 
     address[] private owners;
@@ -31,12 +32,10 @@ contract MultiSigWallet is Pausable {
     Transaction[] private transactions;
     mapping(address => bool) private isOwner;
     mapping(uint => mapping(address => bool)) private isConfirmed;
-    mapping(uint => bytes32) private ids;
 
     struct Transaction {
         address from;
         address to;
-        address tokenAddress;
         uint amount;
         string message;
         bool executed;
@@ -62,8 +61,8 @@ contract MultiSigWallet is Pausable {
         require(!isConfirmed[_txIndex][msg.sender], "tx already confirmed");
         _;
     }
-    
-    constructor(address[] memory _owners, uint _numConfirmationsRequired) {
+
+    constructor(address[] memory _owners, uint _numConfirmationsRequired, string memory name, string memory symbol) ERC20(name, symbol) {
         require(_owners.length > 0, "owners required");
         require(
             _numConfirmationsRequired > 0 &&
@@ -83,37 +82,30 @@ contract MultiSigWallet is Pausable {
 
     function submitTransaction(
         address _to,
-        address _tokenAddress,
         uint _amount,
         string memory _message
     ) public onlyOwner whenNotPaused {
-        require(_tokenAddress != address(0) && _to != address(0), "Address cannot be zero");
         uint txIndex = transactions.length;
-        IERC20 token;
-        token = IERC20(_tokenAddress);
         transactions.push(
             Transaction({
                 from: msg.sender,
                 to: _to,
-                tokenAddress: _tokenAddress,
                 amount: _amount,
                 message: _message,
                 executed: false,
                 numConfirmations: 0
             })
         );
-        bytes32 _id = keccak256(abi.encode(transactions));
-        // bytes32 _id = keccak256(abi.encodePacked(msg.sender, _to, _tokenAddress, _amount));
-        ids[txIndex] = _id;
-        emit SubmitTransaction(msg.sender, txIndex, _to, _tokenAddress, _amount, _message);
+        emit TokenMint(address(this), _amount);
+        _mint(address(this), _amount);
+        _totalSupply += _amount;
+        emit SubmitTransaction(msg.sender, txIndex, _to, _amount, _message);
     }
 
     function confirmTransaction(
-        uint _txIndex,
-        bytes32 _id
+        uint _txIndex
     ) public onlyOwner txExists(_txIndex) notExecuted(_txIndex) notConfirmed(_txIndex) whenNotPaused {
         Transaction storage transaction = transactions[_txIndex];
-        require(ids[_txIndex] == _id, "Invalid parameters");
         // require(transaction.from != msg.sender, "The owner who submit the transaction cannot call this function");
         transaction.numConfirmations += 1;
         isConfirmed[_txIndex][msg.sender] = true;
@@ -121,34 +113,26 @@ contract MultiSigWallet is Pausable {
     }
 
     function executeTransaction(
-        uint _txIndex, bytes32 _id, address _to, address _tokenAddress,  uint256 _amount
+        uint _txIndex, address _to, uint256 _amount
     ) public onlyOwner txExists(_txIndex) notExecuted(_txIndex) whenNotPaused {
         Transaction storage transaction = transactions[_txIndex];
-        require(ids[_txIndex] == _id, "Invalid parameters");
-        require(transaction.to == _to && transaction.tokenAddress == _tokenAddress && transaction.amount == _amount, "Invalid parameters");
+        require(transaction.to == _to && transaction.amount == _amount, "Invalid input");
         require(_amount != 0, "Insufficient amount");
-        require(_tokenAddress != address(0), "Address cannot be zero");
-        IERC20 token;
-        token = IERC20(_tokenAddress);
-        require(
-            token.allowance(msg.sender, address(this)) >= _amount,
-            "Check the token allowance"
-        );
         require(
             transaction.numConfirmations >= numConfirmationsRequired,
             "cannot execute tx"
         );
         emit ExecuteTransaction(msg.sender, _txIndex);
-        transaction.executed = true;    
-        emit TokenTransfered(_tokenAddress, msg.sender, _to, _amount);
-        SafeERC20.safeTransferFrom(token, msg.sender, _to, _amount);
+        transaction.executed = true;   
+        emit TokenTransfered(address(this), msg.sender, _to, _amount);
+        _totalSupply = totalSupply() - _amount;
+        _transfer(address(this), _to, _amount);
     }
 
     function revokeConfirmation(
-        uint _txIndex, bytes32 _id
+        uint _txIndex
     ) public onlyOwner txExists(_txIndex) notExecuted(_txIndex) whenNotPaused {
         Transaction storage transaction = transactions[_txIndex];
-        require(ids[_txIndex] == _id, "Invalid parameters");
         require(isConfirmed[_txIndex][msg.sender], "tx not confirmed");
         transaction.numConfirmations -= 1;
         isConfirmed[_txIndex][msg.sender] = false;
@@ -164,14 +148,13 @@ contract MultiSigWallet is Pausable {
     }
 
     function getTransaction(
-        uint _txIndex, bytes32 _id
+        uint _txIndex
     )
         public
         view
         returns (
             address from,
             address to,
-            address tokenAddress,
             uint amount,
             string memory message,
             bool executed,
@@ -179,11 +162,9 @@ contract MultiSigWallet is Pausable {
         )
     {
         Transaction storage transaction = transactions[_txIndex];
-        require(ids[_txIndex] == _id, "Invalid parameters");
         return (
             transaction.from,
             transaction.to,
-            transaction.tokenAddress,
             transaction.amount,
             transaction.message,
             transaction.executed,
@@ -218,15 +199,14 @@ contract MultiSigWallet is Pausable {
         _unpause();
     }
 
-    function changeNumConfirmationsRequired(uint _txIndex, bytes32 _id, uint256 _numConfirmationsRequired) public whenNotPaused onlyOwner notExecuted(_txIndex) {
+    function changeNumConfirmationsRequired(uint _txIndex, uint256 _numConfirmationsRequired) public whenNotPaused onlyOwner notExecuted(_txIndex) {
         Transaction storage transaction = transactions[_txIndex];
-        require(ids[_txIndex] == _id, "Invalid parameters");
         require(transaction.from == msg.sender, "Owner who submitted the transaction can only call this function");
         require(numConfirmationsRequired != _numConfirmationsRequired, "Numbers of required confirmations is already same");
         numConfirmationsRequired = _numConfirmationsRequired;
     }
 
-    function getId(uint _txIndex) external view returns(bytes32){
-        return ids[_txIndex];
+    function totalSupply() public view override returns (uint256) {
+        return _totalSupply;
     }
 }
